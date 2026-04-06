@@ -1,0 +1,1002 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chorus — JobPin AI</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --col-blocked: #f85149;
+    --col-in-progress: #d29922;
+    --col-draft: #8b949e;
+    --col-ready: #3fb950;
+    --col-review: #a371f7;
+    --col-done: #3fb950;
+    --col-archived: #6e7681;
+    --col-unknown: #6e7681;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .stats {
+    display: flex;
+    gap: 16px;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+
+  .stats .badge {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-weight: 600;
+    font-size: 12px;
+  }
+
+  .search-bar {
+    padding: 8px 24px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .search-bar input {
+    width: 100%;
+    max-width: 400px;
+    padding: 8px 12px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+  }
+
+  .search-bar input:focus { border-color: var(--accent); }
+  .search-bar input::placeholder { color: var(--text-muted); }
+
+  .board {
+    flex: 1;
+    display: flex;
+    gap: 12px;
+    padding: 16px 24px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .column {
+    min-width: 280px;
+    max-width: 320px;
+    flex-shrink: 0;
+    background: var(--surface);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    max-height: 100%;
+  }
+
+  .column-header {
+    padding: 12px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .column-header .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+
+  .column.collapsed {
+    min-width: 200px;
+    max-width: 200px;
+  }
+
+  .column-header .toggle {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .column-header .count {
+    margin-left: auto;
+    background: var(--border);
+    padding: 1px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .column-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    min-height: 60px;
+  }
+
+  .column-body.drag-over {
+    background: rgba(88, 166, 255, 0.08);
+  }
+
+  .card {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 8px;
+    cursor: grab;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    position: relative;
+  }
+
+  .card:hover {
+    border-color: var(--accent);
+  }
+
+  .card.dragging {
+    opacity: 0.4;
+    cursor: grabbing;
+  }
+
+  .card-title {
+    font-size: 13px;
+    font-weight: 500;
+    line-height: 1.4;
+    margin-bottom: 8px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .card-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    flex-wrap: wrap;
+  }
+
+  .card-meta .owner {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-meta .date { white-space: nowrap; }
+
+  .card-meta .git-author {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #58a6ff;
+    font-style: italic;
+  }
+
+  .category-tag {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #58a6ff22;
+    color: #58a6ff;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .inferred-tag {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #d2992233;
+    color: #d29922;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    margin-top: 8px;
+    overflow: hidden;
+  }
+
+  .progress-bar .fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    transition: width 0.3s;
+  }
+
+  .priority-tag {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  .priority-tag.critical { background: #f8514922; color: #f85149; }
+  .priority-tag.high { background: #d2992222; color: #d29922; }
+  .priority-tag.medium { background: #58a6ff22; color: #58a6ff; }
+  .priority-tag.low { background: #8b949e22; color: #8b949e; }
+
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: #1f6feb;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-size: 14px;
+    opacity: 0;
+    transform: translateY(10px);
+    transition: all 0.3s;
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  .toast.show {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--text-muted);
+    font-size: 16px;
+  }
+
+  /* Viewer panel */
+  .viewer-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 200;
+  }
+
+  .viewer-overlay.open { display: block; }
+
+  .viewer-panel {
+    position: fixed;
+    top: 0;
+    right: -60%;
+    width: 60%;
+    height: 100vh;
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    z-index: 300;
+    display: flex;
+    flex-direction: column;
+    transition: right 0.25s ease;
+  }
+
+  .viewer-panel.open { right: 0; }
+
+  .viewer-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+
+  .viewer-title {
+    font-size: 16px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 50%;
+  }
+
+  .viewer-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .viewer-file {
+    font-size: 12px;
+    color: var(--text-muted);
+    font-family: monospace;
+  }
+
+  .viewer-close {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 16px;
+    cursor: pointer;
+    border-radius: 4px;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .viewer-close:hover { background: var(--border); }
+
+  .viewer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+  }
+
+  /* Markdown rendered content */
+  .markdown-body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text);
+  }
+
+  .markdown-body h1 { font-size: 24px; font-weight: 700; margin: 24px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .markdown-body h2 { font-size: 20px; font-weight: 600; margin: 20px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .markdown-body h3 { font-size: 16px; font-weight: 600; margin: 18px 0 8px; }
+  .markdown-body h4 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
+
+  .markdown-body p { margin: 8px 0; }
+
+  .markdown-body ul, .markdown-body ol { padding-left: 24px; margin: 8px 0; }
+  .markdown-body li { margin: 4px 0; }
+
+  .markdown-body code {
+    background: #1c2128;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 13px;
+  }
+
+  .markdown-body pre {
+    background: #1c2128;
+    padding: 16px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 12px 0;
+  }
+
+  .markdown-body pre code {
+    background: none;
+    padding: 0;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .markdown-body blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 16px;
+    margin: 12px 0;
+    color: var(--text-muted);
+  }
+
+  .markdown-body hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+  }
+
+  .markdown-body table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 12px 0;
+  }
+
+  .markdown-body th, .markdown-body td {
+    border: 1px solid var(--border);
+    padding: 8px 12px;
+    text-align: left;
+  }
+
+  .markdown-body th { background: #1c2128; font-weight: 600; }
+
+  .markdown-body strong { font-weight: 600; }
+  .markdown-body em { font-style: italic; }
+
+  .markdown-body a { color: var(--accent); text-decoration: none; }
+  .markdown-body a:hover { text-decoration: underline; }
+
+  .markdown-body .checkbox {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: middle;
+    position: relative;
+    top: -1px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .markdown-body .checkbox:hover {
+    border-color: var(--accent);
+  }
+
+  .markdown-body .checkbox.checked {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .markdown-body .checkbox.checked::after {
+    content: '✓';
+    color: white;
+    font-size: 11px;
+    position: absolute;
+    top: -1px;
+    left: 2px;
+  }
+
+  .markdown-body img { max-width: 100%; border-radius: 6px; }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chorus <span style="font-weight:400;font-size:14px;color:var(--text-muted)">JobPin AI Project Management</span></h1>
+  <div class="stats" id="stats"></div>
+</header>
+
+<div class="search-bar">
+  <input type="text" id="search" placeholder="Search by title, owner, tags..." />
+</div>
+
+<div class="board" id="board">
+  <div class="loading">Loading PRDs...</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- PRD Viewer Panel -->
+<div class="viewer-overlay" id="viewerOverlay"></div>
+<div class="viewer-panel" id="viewerPanel">
+  <div class="viewer-header">
+    <span class="viewer-title" id="viewerTitle"></span>
+    <div class="viewer-actions">
+      <span class="viewer-file" id="viewerFile"></span>
+      <button class="viewer-close" id="viewerClose">✕</button>
+    </div>
+  </div>
+  <div class="viewer-body">
+    <div class="markdown-body" id="viewerContent"></div>
+  </div>
+</div>
+
+<script>
+const COLUMN_COLORS = {
+  'blocked': '#f85149',
+  'in-progress': '#d29922',
+  'draft': '#8b949e',
+  'ready': '#3fb950',
+  'review': '#a371f7',
+  'done': '#3fb950',
+  'archived': '#6e7681',
+  'unknown': '#6e7681',
+};
+
+const COLUMN_LABELS = {
+  'blocked': 'Blocked',
+  'in-progress': 'In Progress',
+  'draft': 'Draft',
+  'ready': 'Ready',
+  'review': 'Review',
+  'done': 'Done',
+  'archived': 'Archived',
+  'unknown': 'Unknown',
+};
+
+let allPRDs = [];
+let statuses = [];
+
+// ---- API ----
+
+async function fetchPRDs() {
+  const res = await fetch('/api/prds');
+  const data = await res.json();
+  allPRDs = data.prds;
+  statuses = [...data.statuses, 'unknown'];
+  return allPRDs;
+}
+
+async function updateStatus(file, status) {
+  const res = await fetch('/api/prds/status', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ file, status }),
+  });
+  return res.json();
+}
+
+// ---- Rendering ----
+
+function groupBy(prds) {
+  const groups = {};
+  for (const s of statuses) groups[s] = [];
+  for (const prd of prds) {
+    (groups[prd.status] || groups['unknown']).push(prd);
+  }
+  return groups;
+}
+
+function renderCard(prd) {
+  const card = document.createElement('div');
+  card.className = 'card';
+  card.draggable = true;
+  card.dataset.file = prd.file;
+
+  let priorityHtml = '';
+  if (prd.priority) {
+    priorityHtml = `<span class="priority-tag ${prd.priority}">${prd.priority}</span>`;
+  }
+
+  let inferredHtml = '';
+  if (prd.statusInferred) {
+    inferredHtml = `<span class="inferred-tag" title="Status auto-inferred from content">inferred</span>`;
+  }
+
+  let categoryHtml = '';
+  if (prd.category && prd.category !== 'prd') {
+    categoryHtml = `<span class="category-tag">${escHtml(prd.category)}</span>`;
+  }
+
+  let checklistHtml = '';
+  if (prd.checklist) {
+    checklistHtml = `
+      <div class="progress-bar">
+        <div class="fill" style="width: ${prd.checklist.percent}%"></div>
+      </div>`;
+  }
+
+  const date = prd.date ? prd.date.slice(0, 10) : '';
+  const ownerDisplay = prd.owner || '';
+  const gitAuthorDisplay = prd.gitAuthor && prd.gitAuthor !== prd.owner ? prd.gitAuthor : '';
+
+  card.innerHTML = `
+    <div class="card-title">${escHtml(prd.title)}</div>
+    <div class="card-meta">
+      ${categoryHtml}
+      ${priorityHtml}
+      ${inferredHtml}
+      ${ownerDisplay ? `<span class="owner" title="Owner">${escHtml(ownerDisplay)}</span>` : ''}
+      ${gitAuthorDisplay ? `<span class="git-author" title="Git author (created by)">git: ${escHtml(gitAuthorDisplay)}</span>` : ''}
+      ${date ? `<span class="date">${date}</span>` : ''}
+      ${prd.checklist ? `<span>${prd.checklist.checked}/${prd.checklist.total}</span>` : ''}
+    </div>
+    ${checklistHtml}
+  `;
+
+  // Drag events
+  card.addEventListener('dragstart', (e) => {
+    card.classList.add('dragging');
+    e.dataTransfer.setData('text/plain', prd.file);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+    document.querySelectorAll('.drag-over').forEach(el => el.classList.remove('drag-over'));
+  });
+
+  // Click to open viewer (only if not dragging)
+  let isDragging = false;
+  card.addEventListener('mousedown', () => { isDragging = false; });
+  card.addEventListener('mousemove', () => { isDragging = true; });
+  card.addEventListener('mouseup', () => {
+    if (!isDragging) openViewer(prd);
+  });
+
+  return card;
+}
+
+function renderBoard(prds) {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+
+  const groups = groupBy(prds);
+
+  // Stats
+  const statsEl = document.getElementById('stats');
+  statsEl.innerHTML = `<span>Total: ${prds.length}</span>` +
+    statuses
+      .filter(s => groups[s].length > 0)
+      .map(s => `<span><span class="badge" style="background:${COLUMN_COLORS[s]}33;color:${COLUMN_COLORS[s]}">${groups[s].length}</span> ${COLUMN_LABELS[s]}</span>`)
+      .join('');
+
+  for (const status of statuses) {
+    const items = groups[status];
+    if (items.length === 0 && (status === 'archived')) continue;
+
+    const isCollapsible = true; // All columns can collapse
+    const savedState = localStorage.getItem(`prd-col-${status}`);
+    // Default: all expanded (including unknown)
+    const isCollapsed = savedState === 'collapsed';
+
+    const col = document.createElement('div');
+    col.className = 'column' + (isCollapsed ? ' collapsed' : '');
+    col.innerHTML = `
+      <div class="column-header" style="cursor:pointer">
+        <span class="dot" style="background:${COLUMN_COLORS[status]}"></span>
+        ${COLUMN_LABELS[status]}
+        <span class="count">${items.length}</span>
+        <span class="toggle">${isCollapsed ? '▸' : '▾'}</span>
+      </div>
+    `;
+
+    const body = document.createElement('div');
+    body.className = 'column-body';
+    body.dataset.status = status;
+    if (isCollapsed) body.style.display = 'none';
+
+    col.querySelector('.column-header').addEventListener('click', () => {
+      const hidden = body.style.display === 'none';
+      body.style.display = hidden ? '' : 'none';
+      col.classList.toggle('collapsed', !hidden);
+      col.querySelector('.toggle').textContent = hidden ? '▾' : '▸';
+      localStorage.setItem(`prd-col-${status}`, hidden ? 'expanded' : 'collapsed');
+    });
+
+    for (const prd of items) {
+      body.appendChild(renderCard(prd));
+    }
+
+    // Drop events
+    body.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      body.classList.add('drag-over');
+    });
+
+    body.addEventListener('dragleave', (e) => {
+      if (!body.contains(e.relatedTarget)) {
+        body.classList.remove('drag-over');
+      }
+    });
+
+    body.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      body.classList.remove('drag-over');
+
+      const file = e.dataTransfer.getData('text/plain');
+      const newStatus = body.dataset.status;
+
+      // Find the PRD and check if status actually changed
+      const prd = allPRDs.find(p => p.file === file);
+      if (!prd || prd.status === newStatus) return;
+
+      // Optimistic update
+      prd.status = newStatus;
+      renderBoard(filterPRDs(document.getElementById('search').value));
+
+      // Persist
+      try {
+        await updateStatus(file, newStatus);
+        showToast(`Moved "${prd.title.slice(0, 40)}" → ${COLUMN_LABELS[newStatus]}`);
+      } catch (err) {
+        showToast('Failed to update status', true);
+        // Re-fetch to get correct state
+        await fetchPRDs();
+        renderBoard(filterPRDs(document.getElementById('search').value));
+      }
+    });
+
+    col.appendChild(body);
+    board.appendChild(col);
+  }
+}
+
+// ---- Search ----
+
+function filterPRDs(query) {
+  if (!query) return allPRDs;
+  const q = query.toLowerCase();
+  return allPRDs.filter(prd =>
+    prd.title.toLowerCase().includes(q) ||
+    prd.owner.toLowerCase().includes(q) ||
+    (prd.gitAuthor || '').toLowerCase().includes(q) ||
+    prd.tags.toLowerCase().includes(q) ||
+    prd.filename.toLowerCase().includes(q)
+  );
+}
+
+document.getElementById('search').addEventListener('input', (e) => {
+  renderBoard(filterPRDs(e.target.value));
+});
+
+// ---- Toast ----
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+// ---- Viewer ----
+
+/**
+ * Lightweight Markdown → HTML renderer.
+ * Supports: headings, bold, italic, inline code, code blocks, blockquotes,
+ * tables, checkboxes, lists, links, images, horizontal rules.
+ */
+function renderMarkdown(md) {
+  // Strip YAML frontmatter
+  md = md.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, '');
+
+  let html = '';
+  let checkboxIndex = 0;
+  const lines = md.split('\n');
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (line.trim().startsWith('```')) {
+      const lang = line.trim().slice(3).trim();
+      let code = '';
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith('```')) {
+        code += escHtml(lines[i]) + '\n';
+        i++;
+      }
+      i++; // skip closing ```
+      html += `<pre><code>${code}</code></pre>\n`;
+      continue;
+    }
+
+    // Table
+    if (line.includes('|') && line.trim().startsWith('|')) {
+      let tableHtml = '<table>';
+      // Header row
+      const headers = line.split('|').filter(c => c.trim()).map(c => c.trim());
+      tableHtml += '<tr>' + headers.map(h => `<th>${inlineFormat(h)}</th>`).join('') + '</tr>';
+      i++;
+      // Separator row (skip)
+      if (i < lines.length && /^\s*\|[\s\-:|]+\|\s*$/.test(lines[i])) i++;
+      // Data rows
+      while (i < lines.length && lines[i].includes('|') && lines[i].trim().startsWith('|')) {
+        const cols = lines[i].split('|').filter(c => c.trim()).map(c => c.trim());
+        tableHtml += '<tr>' + cols.map(c => `<td>${inlineFormat(c)}</td>`).join('') + '</tr>';
+        i++;
+      }
+      html += tableHtml + '</table>\n';
+      continue;
+    }
+
+    // Heading
+    const headingMatch = line.match(/^(#{1,4})\s+(.+)/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      html += `<h${level}>${inlineFormat(headingMatch[2])}</h${level}>\n`;
+      i++;
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
+      html += '<hr>\n';
+      i++;
+      continue;
+    }
+
+    // Blockquote
+    if (line.trim().startsWith('>')) {
+      let bq = '';
+      while (i < lines.length && lines[i].trim().startsWith('>')) {
+        bq += lines[i].replace(/^>\s?/, '') + '\n';
+        i++;
+      }
+      html += `<blockquote>${inlineFormat(bq.trim())}</blockquote>\n`;
+      continue;
+    }
+
+    // Unordered list / checkbox
+    if (/^\s*[-*]\s/.test(line)) {
+      html += '<ul>';
+      while (i < lines.length && /^\s*[-*]\s/.test(lines[i])) {
+        const content = lines[i].replace(/^\s*[-*]\s/, '');
+        // Checkbox
+        const cbMatch = content.match(/^\[([ xX])\]\s*(.*)/);
+        if (cbMatch) {
+          const checked = cbMatch[1] !== ' ';
+          html += `<li><span class="checkbox${checked ? ' checked' : ''}" data-cb-index="${checkboxIndex}" role="button" tabindex="0"></span>${inlineFormat(cbMatch[2])}</li>`;
+          checkboxIndex++;
+        } else {
+          html += `<li>${inlineFormat(content)}</li>`;
+        }
+        i++;
+      }
+      html += '</ul>\n';
+      continue;
+    }
+
+    // Ordered list
+    if (/^\s*\d+\.\s/.test(line)) {
+      html += '<ol>';
+      while (i < lines.length && /^\s*\d+\.\s/.test(lines[i])) {
+        const content = lines[i].replace(/^\s*\d+\.\s/, '');
+        html += `<li>${inlineFormat(content)}</li>`;
+        i++;
+      }
+      html += '</ol>\n';
+      continue;
+    }
+
+    // Empty line
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+
+    // Paragraph
+    let para = '';
+    while (i < lines.length && lines[i].trim() !== '' && !/^(#{1,4}\s|```|\||>\s|\s*[-*]\s|\s*\d+\.\s|---|\*\*\*|___)/.test(lines[i])) {
+      para += lines[i] + ' ';
+      i++;
+    }
+    html += `<p>${inlineFormat(para.trim())}</p>\n`;
+  }
+
+  return html;
+}
+
+/** Inline formatting: bold, italic, code, links, images */
+function inlineFormat(text) {
+  if (!text) return '';
+  return text
+    // Images
+    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" />')
+    // Links
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>')
+    // Bold + italic
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    // Italic
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    // Inline code
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+}
+
+let currentViewerFile = null;
+
+async function openViewer(prd) {
+  const panel = document.getElementById('viewerPanel');
+  const overlay = document.getElementById('viewerOverlay');
+  const titleEl = document.getElementById('viewerTitle');
+  const fileEl = document.getElementById('viewerFile');
+  const contentEl = document.getElementById('viewerContent');
+
+  currentViewerFile = prd.file;
+  titleEl.textContent = prd.title;
+  fileEl.textContent = prd.file;
+  contentEl.innerHTML = '<p style="color:var(--text-muted)">Loading...</p>';
+
+  panel.classList.add('open');
+  overlay.classList.add('open');
+
+  try {
+    const res = await fetch(`/api/prds/content?file=${encodeURIComponent(prd.file)}`);
+    const data = await res.json();
+    renderViewerContent(contentEl, data.content);
+  } catch {
+    contentEl.innerHTML = '<p style="color:#f85149">Failed to load content.</p>';
+  }
+}
+
+function renderViewerContent(container, mdContent) {
+  container.innerHTML = renderMarkdown(mdContent);
+
+  // Bind click handlers to all checkboxes
+  container.querySelectorAll('.checkbox[data-cb-index]').forEach(cb => {
+    cb.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const index = parseInt(cb.dataset.cbIndex);
+      const isChecked = cb.classList.contains('checked');
+      const newChecked = !isChecked;
+
+      // Optimistic UI update
+      cb.classList.toggle('checked', newChecked);
+
+      try {
+        const res = await fetch('/api/prds/checkbox', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: currentViewerFile, index, checked: newChecked }),
+        });
+        const data = await res.json();
+        if (!data.ok) throw new Error('failed');
+
+        // Re-render with server response to stay in sync
+        renderViewerContent(container, data.content);
+        showToast(newChecked ? 'Checked ✓' : 'Unchecked');
+
+        // Refresh board data (checklist progress may have changed)
+        await fetchPRDs();
+        renderBoard(filterPRDs(document.getElementById('search').value));
+      } catch {
+        // Revert on failure
+        cb.classList.toggle('checked', isChecked);
+        showToast('Failed to update checkbox');
+      }
+    });
+  });
+}
+
+function closeViewer() {
+  document.getElementById('viewerPanel').classList.remove('open');
+  document.getElementById('viewerOverlay').classList.remove('open');
+}
+
+document.getElementById('viewerClose').addEventListener('click', closeViewer);
+document.getElementById('viewerOverlay').addEventListener('click', closeViewer);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeViewer(); });
+
+// ---- Util ----
+
+function escHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---- Init ----
+
+(async () => {
+  await fetchPRDs();
+  renderBoard(allPRDs);
+})();
+</script>
+</body>
+</html>
