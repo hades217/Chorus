@@ -84,6 +84,17 @@ function normalizeStatus(raw) {
   return MAP[s] || 'unknown';
 }
 
+function stripQuotes(value) {
+  if (value.length >= 2) {
+    const first = value[0];
+    const last = value[value.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
 function parseYamlFrontmatter(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return null;
@@ -92,7 +103,7 @@ function parseYamlFrontmatter(content) {
   for (const line of match[1].split('\n')) {
     const kv = line.match(/^(\w[\w\s]*?):\s*(.+)/);
     if (kv) {
-      meta[kv[1].trim().toLowerCase()] = kv[2].trim();
+      meta[kv[1].trim().toLowerCase()] = stripQuotes(kv[2].trim());
     }
   }
   return meta;
