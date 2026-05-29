@@ -1,6 +1,10 @@
-# Chorus
+<p align="center">
+  <img src="assets/logo.svg" width="84" height="84" alt="Chorus logo" />
+</p>
 
-**AI-Native Project Management. No Jira. No Linear. Just Markdown.**
+<h1 align="center">Chorus</h1>
+
+<p align="center"><strong>AI-Native Project Management. No Jira. No Linear. Just Markdown.</strong></p>
 
 Chorus is a project management system where markdown files are the database, AI agents auto-update status and checklists, and a local kanban board gives you drag-and-drop control. Built for teams where every developer works with AI.
 
