@@ -14,6 +14,10 @@ Your AI is your project manager.
 Your Git repo is your single source of truth.
 ```
 
+<p align="center">
+  <img src="assets/screenshot.png" width="900" alt="Chorus kanban board — PRDs as cards across ADLC stages" />
+</p>
+
 ---
 
 ## The Problem
