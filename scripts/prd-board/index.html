@@ -271,6 +271,56 @@
   .sync-banner.conflict { background: #b62324; }
   .sync-banner.error { background: #9a6700; }
 
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .gh-pill {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border, #30363d);
+    background: var(--card, #161b22);
+    color: var(--text, #c9d1d9);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .gh-pill:hover { border-color: #6e7681; }
+  .gh-pill.connected { color: #3fb950; border-color: #238636; }
+  .gh-pill.attention { color: #d29922; border-color: #9a6700; }
+
+  .gh-modal-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 200;
+    align-items: center; justify-content: center;
+  }
+  .gh-modal-overlay.open { display: flex; }
+  .gh-modal {
+    background: var(--card, #161b22);
+    border: 1px solid var(--border, #30363d);
+    border-radius: 12px;
+    padding: 28px 32px;
+    max-width: 440px;
+    position: relative;
+    color: var(--text, #c9d1d9);
+  }
+  .gh-modal h2 { margin: 0 0 12px; font-size: 18px; }
+  .gh-modal p { line-height: 1.6; font-size: 14px; }
+  .gh-modal-close {
+    position: absolute; top: 10px; right: 14px;
+    background: none; border: none; color: var(--text-muted, #8b949e);
+    font-size: 22px; cursor: pointer;
+  }
+  .gh-code {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 26px; letter-spacing: 4px; font-weight: 700;
+    background: #0d1117; border: 1px solid var(--border, #30363d);
+    border-radius: 8px; padding: 10px 18px; margin: 10px 0;
+    color: #58a6ff; user-select: all;
+  }
+  .gh-modal a { color: #58a6ff; }
+
   .toast {
     position: fixed;
     bottom: 24px;
@@ -501,7 +551,10 @@
 
 <header>
   <h1>Chorus <span style="font-weight:400;font-size:14px;color:var(--text-muted)">JobPin AI Project Management</span></h1>
-  <div class="stats" id="stats"></div>
+  <div class="header-right">
+    <button class="gh-pill" id="ghPill" style="display:none"></button>
+    <div class="stats" id="stats"></div>
+  </div>
 </header>
 
 <div class="search-bar">
@@ -513,6 +566,14 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div class="gh-modal-overlay" id="ghModalOverlay">
+  <div class="gh-modal">
+    <button class="gh-modal-close" id="ghModalClose">&times;</button>
+    <h2>Connect GitHub</h2>
+    <p id="ghModalBody"></p>
+  </div>
+</div>
 
 <!-- PRD Viewer Panel -->
 <div class="viewer-overlay" id="viewerOverlay"></div>
@@ -1037,13 +1098,99 @@ async function pollSyncStatus() {
   }
 }
 
+// ---- GitHub connection (one-click OAuth Device Flow) ----
+
+const ghPill = document.getElementById('ghPill');
+const ghOverlay = document.getElementById('ghModalOverlay');
+const ghBody = document.getElementById('ghModalBody');
+
+function openGhModal(html) { ghBody.innerHTML = html; ghOverlay.classList.add('open'); }
+function closeGhModal() { ghOverlay.classList.remove('open'); }
+document.getElementById('ghModalClose').addEventListener('click', closeGhModal);
+ghOverlay.addEventListener('click', (e) => { if (e.target === ghOverlay) closeGhModal(); });
+
+let ghConnecting = false;
+
+async function pollGithubStatus() {
+  let s;
+  try { s = await (await fetch('/api/github/status')).json(); }
+  catch { return; }
+
+  ghPill.style.display = '';
+  ghPill.className = 'gh-pill';
+
+  if (s.connected) {
+    ghPill.textContent = `✓ @${s.login}`;
+    ghPill.classList.add('connected');
+    ghPill.title = 'Click to disconnect';
+    if (ghConnecting) { ghConnecting = false; closeGhModal(); showToast(`Connected as @${s.login}`); }
+    return;
+  }
+
+  if (!s.clientConfigured) {
+    ghPill.textContent = 'GitHub: not set up';
+    ghPill.classList.add('attention');
+    ghPill.title = 'One-click connect needs a GitHub OAuth App client_id';
+    return;
+  }
+
+  if (s.pending) {
+    ghConnecting = true;
+    ghPill.textContent = 'Authorizing…';
+    ghPill.classList.add('attention');
+    openGhModal(
+      `Enter this code at <a href="${s.pending.verification_uri}" target="_blank" rel="noopener">${s.pending.verification_uri}</a>` +
+      ` (a browser tab should have opened):<br><span class="gh-code">${s.pending.user_code}</span><br>Waiting for you to authorize…`
+    );
+    return;
+  }
+
+  ghPill.textContent = 'Connect GitHub';
+  ghPill.title = 'Authorize the board to push/pull on your behalf';
+}
+
+ghPill.addEventListener('click', async () => {
+  const connected = ghPill.classList.contains('connected');
+  if (connected) {
+    if (confirm('Disconnect GitHub? Auto-sync will stop pushing/pulling until you reconnect.')) {
+      await fetch('/api/github/disconnect', { method: 'POST' });
+      pollGithubStatus();
+    }
+    return;
+  }
+  if (ghPill.textContent.includes('not set up')) {
+    openGhModal(
+      'One-click connect needs a <strong>GitHub OAuth App</strong> client_id (free, public). ' +
+      'Create one at <a href="https://github.com/settings/developers" target="_blank" rel="noopener">Developer settings → New OAuth App</a>, ' +
+      'enable <em>Device Flow</em>, then start the board with ' +
+      '<code>CHORUS_GITHUB_CLIENT_ID=&lt;id&gt;</code>.'
+    );
+    return;
+  }
+  // Begin the device flow.
+  ghPill.textContent = 'Starting…';
+  try {
+    const r = await (await fetch('/api/github/connect', { method: 'POST' })).json();
+    if (r.error) { openGhModal(`Could not start: ${escHtml(r.error)}`); return; }
+    ghConnecting = true;
+    openGhModal(
+      `Enter this code at <a href="${r.verification_uri}" target="_blank" rel="noopener">${r.verification_uri}</a>` +
+      ` (a browser tab should have opened):<br><span class="gh-code">${r.user_code}</span><br>Waiting for you to authorize…`
+    );
+    pollGithubStatus();
+  } catch {
+    openGhModal('Could not reach the server to start authorization.');
+  }
+});
+
 // ---- Init ----
 
 (async () => {
   await fetchPRDs();
   renderBoard(allPRDs);
   await pollSyncStatus();
-  setInterval(pollSyncStatus, 5000);
+  await pollGithubStatus();
+  setInterval(() => { pollSyncStatus(); pollGithubStatus(); }, 5000);
 })();
 </script>
 </body>

@@ -300,6 +300,29 @@ Tune the pull interval with `CHORUS_GIT_PULL_SECONDS` (default `30`; `0`
 disables inbound pulling). The board's live-refresh works even with sync
 off, so an AI agent editing a PRD updates your board instantly either way.
 
+### Connecting GitHub — one click, no token hunting
+
+Push/pull needs GitHub credentials. Developers already have them (if you can
+`git push` your code, sync just works). For everyone else, the board offers a
+**Connect GitHub** button — click it, authorize in the browser, done. It uses
+GitHub's OAuth **Device Flow**, the same one-tap flow as `gh` and VS Code; the
+token is handed to git's credential helper (your OS keychain), so it's stored
+once and never asked for again. Each person authorizes as themselves, so
+commits stay attributed.
+
+One-time setup (by whoever distributes your Chorus board): register a GitHub
+**OAuth App** — [Developer settings → New OAuth App](https://github.com/settings/developers),
+turn on **Enable Device Flow** — and pass its client_id:
+
+```bash
+CHORUS_GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx CHORUS_GIT_SYNC=1 \
+  node scripts/prd-board/server.mjs
+```
+
+The client_id is public (safe to commit), and the whole team shares it —
+everyone else just clicks the button. Without it, sync falls back to whatever
+git credentials the machine already has.
+
 ## Frontmatter Spec
 
 ### Required fields

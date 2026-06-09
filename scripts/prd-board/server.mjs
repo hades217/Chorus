@@ -36,6 +36,13 @@ const GIT_SYNC_DEBOUNCE_MS = 10_000;
 // of the Dropbox model). Set CHORUS_GIT_PULL_SECONDS=0 to disable pulling.
 const GIT_SYNC_PULL_MS = Math.max(0, Number(process.env.CHORUS_GIT_PULL_SECONDS ?? 30)) * 1000;
 
+// One-click GitHub auth from the board UI (OAuth Device Flow). Set to your
+// GitHub OAuth App's client_id (public — safe to commit). The app must have
+// "Enable Device Flow" turned on. Without it, the board falls back to whatever
+// git credentials the machine already has.
+const GITHUB_CLIENT_ID = process.env.CHORUS_GITHUB_CLIENT_ID || '';
+const GITHUB_SCOPE = 'repo'; // push/pull to private repos
+
 // Directories to scan for PRD/project docs (relative to ROOT)
 // Add your own directories here
 const SCAN_DIRS = [
@@ -575,6 +582,139 @@ process.on('SIGINT', () => {
 });
 
 // ---------------------------------------------------------------------------
+// GitHub connection — one-click OAuth Device Flow, driven from the board UI so
+// nobody has to find/paste a token. The obtained token is handed to git via its
+// normal credential helper (OS keychain), so every subsequent push/pull just
+// works. Each user authorizes as themselves, so commits stay attributed.
+// ---------------------------------------------------------------------------
+
+let githubAuth = { connected: false, login: null };
+let devicePending = null; // { user_code, verification_uri, expiresAt, interval, device_code }
+
+async function ghPost(url, params) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params).toString(),
+  });
+  return res.json();
+}
+
+function getCredentialHelper() {
+  try { return git('config', '--get', 'credential.helper').trim(); } catch { return ''; }
+}
+
+// git credential approve/reject/fill need a helper configured to persist; pick a
+// sensible default for the platform if the user hasn't set one.
+function ensureCredentialHelper() {
+  if (getCredentialHelper()) return;
+  const helper = process.platform === 'darwin' ? 'osxkeychain'
+    : process.platform === 'win32' ? 'manager' : 'store';
+  gitTry('config', 'credential.helper', helper);
+  if (helper === 'store') {
+    console.warn('  [github] no OS keychain — token will be stored in ~/.git-credentials (plaintext)');
+  }
+}
+
+function gitCredential(action, fields) {
+  const input = Object.entries(fields).map(([k, v]) => `${k}=${v}`).join('\n') + '\n\n';
+  try {
+    return execFileSync('git', ['credential', action], {
+      cwd: ROOT, input, stdio: ['pipe', 'pipe', 'pipe'],
+    }).toString();
+  } catch { return ''; }
+}
+
+function readStoredToken() {
+  const out = gitCredential('fill', { protocol: 'https', host: 'github.com' });
+  const m = out.match(/^password=(.*)$/m);
+  return m ? m[1] : '';
+}
+
+function storeCredential(login, token) {
+  ensureCredentialHelper();
+  gitCredential('approve', { protocol: 'https', host: 'github.com', username: login || 'x-access-token', password: token });
+}
+
+async function probeUser(token) {
+  try {
+    const res = await fetch('https://api.github.com/user', {
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'chorus-board' },
+    });
+    if (!res.ok) return null;
+    return (await res.json()).login || null;
+  } catch { return null; }
+}
+
+async function refreshGithubAuth() {
+  const token = readStoredToken();
+  const login = token ? await probeUser(token) : null;
+  githubAuth = login ? { connected: true, login } : { connected: false, login: null };
+}
+
+function disconnectGithub() {
+  gitCredential('reject', { protocol: 'https', host: 'github.com' });
+  githubAuth = { connected: false, login: null };
+  devicePending = null;
+}
+
+function openBrowser(url) {
+  const [cmd, cmdArgs] = process.platform === 'darwin' ? ['open', [url]]
+    : process.platform === 'win32' ? ['cmd', ['/c', 'start', '', url]]
+    : ['xdg-open', [url]];
+  try { execFileSync(cmd, cmdArgs, { stdio: 'ignore' }); } catch { /* best effort */ }
+}
+
+async function startDeviceFlow() {
+  if (!GITHUB_CLIENT_ID) throw new Error('CHORUS_GITHUB_CLIENT_ID is not set');
+  const r = await ghPost('https://github.com/login/device/code', { client_id: GITHUB_CLIENT_ID, scope: GITHUB_SCOPE });
+  if (!r.device_code) throw new Error(r.error_description || 'could not start device flow');
+  devicePending = {
+    device_code: r.device_code,
+    user_code: r.user_code,
+    verification_uri: r.verification_uri,
+    interval: r.interval || 5,
+    expiresAt: Date.now() + (r.expires_in || 900) * 1000,
+  };
+  console.log(`  [github] authorize at ${r.verification_uri} with code ${r.user_code}`);
+  openBrowser(r.verification_uri);
+  pollDeviceToken();
+  return devicePending;
+}
+
+function pollDeviceToken() {
+  if (!devicePending) return;
+  setTimeout(async () => {
+    if (!devicePending) return;
+    if (Date.now() > devicePending.expiresAt) {
+      console.error('  [github] device code expired — click Connect again');
+      devicePending = null;
+      return;
+    }
+    let r;
+    try {
+      r = await ghPost('https://github.com/login/oauth/access_token', {
+        client_id: GITHUB_CLIENT_ID,
+        device_code: devicePending.device_code,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      });
+    } catch { pollDeviceToken(); return; } // transient network — keep polling
+    if (r.access_token) {
+      const login = await probeUser(r.access_token);
+      storeCredential(login, r.access_token);
+      await refreshGithubAuth();
+      devicePending = null;
+      console.log(`  [github] connected as @${githubAuth.login || '?'} — sync can now push/pull`);
+      return;
+    }
+    if (r.error === 'authorization_pending') { pollDeviceToken(); return; }
+    if (r.error === 'slow_down') { devicePending.interval += 5; pollDeviceToken(); return; }
+    console.error(`  [github] authorization ${r.error || 'failed'}`);
+    devicePending = null;
+  }, devicePending.interval * 1000).unref();
+}
+
+// ---------------------------------------------------------------------------
 // HTTP Server
 // ---------------------------------------------------------------------------
 
@@ -586,6 +726,46 @@ async function handleRequest(req, res) {
   if (url.pathname === '/api/sync-status' && req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ...syncState, revision: boardRevision }));
+    return;
+  }
+
+  // API: GitHub connection status (polled by the board's "Connect GitHub" pill)
+  if (url.pathname === '/api/github/status' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      clientConfigured: !!GITHUB_CLIENT_ID,
+      connected: githubAuth.connected,
+      login: githubAuth.login,
+      pending: devicePending
+        ? { user_code: devicePending.user_code, verification_uri: devicePending.verification_uri, expiresAt: devicePending.expiresAt }
+        : null,
+    }));
+    return;
+  }
+
+  // API: begin GitHub Device Flow (returns the code for the user to enter)
+  if (url.pathname === '/api/github/connect' && req.method === 'POST') {
+    if (!GITHUB_CLIENT_ID) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'CHORUS_GITHUB_CLIENT_ID is not set — register a GitHub OAuth App (with Device Flow enabled) and pass its client_id.' }));
+      return;
+    }
+    try {
+      const p = devicePending || await startDeviceFlow();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ user_code: p.user_code, verification_uri: p.verification_uri, expiresAt: p.expiresAt }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // API: disconnect GitHub (drop the stored token)
+  if (url.pathname === '/api/github/disconnect' && req.method === 'POST') {
+    disconnectGithub();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
     return;
   }
 
@@ -718,4 +898,13 @@ server.listen(PORT, () => {
   // push-sync is on.
   startWatcher();
   startPullLoop();
+
+  // Reflect existing git credentials in the board's GitHub pill.
+  refreshGithubAuth().then(() => {
+    if (GITHUB_CLIENT_ID) {
+      console.log(`  GitHub: ${githubAuth.connected ? `connected as @${githubAuth.login}` : 'click "Connect GitHub" on the board to authorize'}`);
+    } else if (GIT_SYNC_PUSH) {
+      console.log('  GitHub: one-click connect off (set CHORUS_GITHUB_CLIENT_ID); using existing git credentials');
+    }
+  });
 });
