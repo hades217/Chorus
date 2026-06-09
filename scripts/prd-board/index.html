@@ -259,6 +259,18 @@
   .priority-tag.medium { background: #58a6ff22; color: #58a6ff; }
   .priority-tag.low { background: #8b949e22; color: #8b949e; }
 
+  .sync-banner {
+    display: none;
+    padding: 10px 20px;
+    font-size: 14px;
+    font-weight: 500;
+    color: #fff;
+    text-align: center;
+  }
+  .sync-banner.show { display: block; }
+  .sync-banner.conflict { background: #b62324; }
+  .sync-banner.error { background: #9a6700; }
+
   .toast {
     position: fixed;
     bottom: 24px;
@@ -484,6 +496,8 @@
 </style>
 </head>
 <body>
+
+<div class="sync-banner" id="syncBanner"></div>
 
 <header>
   <h1>Chorus <span style="font-weight:400;font-size:14px;color:var(--text-muted)">JobPin AI Project Management</span></h1>
@@ -991,11 +1005,45 @@ function escHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// ---- Sync status polling (inbound half of the Dropbox model) ----
+// Poll /api/sync-status; when the server's revision changes (a teammate's
+// change was pulled, or an AI/editor edited a file) refresh the board, and
+// surface a banner when auto-sync is paused on a conflict.
+
+let lastRevision = null;
+
+async function pollSyncStatus() {
+  let s;
+  try {
+    const res = await fetch('/api/sync-status');
+    s = await res.json();
+  } catch {
+    return; // server momentarily unreachable — try again next tick
+  }
+
+  // Refresh the board when files changed on disk (skip the very first poll).
+  if (lastRevision !== null && s.revision !== lastRevision) {
+    await fetchPRDs();
+  }
+  lastRevision = s.revision;
+
+  const banner = document.getElementById('syncBanner');
+  banner.className = 'sync-banner';
+  if (s.status === 'conflict' || s.status === 'error') {
+    const files = (s.files && s.files.length) ? ` (${s.files.join(', ')})` : '';
+    banner.textContent = (s.status === 'conflict' ? '⚠ Sync paused — merge conflict' : '⚠ Sync error') +
+      `: ${s.message}${files}`;
+    banner.classList.add('show', s.status);
+  }
+}
+
 // ---- Init ----
 
 (async () => {
   await fetchPRDs();
   renderBoard(allPRDs);
+  await pollSyncStatus();
+  setInterval(pollSyncStatus, 5000);
 })();
 </script>
 </body>

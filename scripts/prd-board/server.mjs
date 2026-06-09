@@ -14,6 +14,8 @@
 
 import { createServer } from 'node:http';
 import { readdir, readFile, writeFile, stat } from 'node:fs/promises';
+import { existsSync, watch } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { join, basename, extname, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -21,6 +23,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..', '..');
 const DOCS_DIR = join(ROOT, 'docs');
 const PORT = 4000;
+
+// Git auto-sync (opt-in). Set via environment variable:
+//   CHORUS_GIT_SYNC=1       → auto commit + pull --rebase + push after each change
+//   CHORUS_GIT_SYNC=commit  → auto commit only (push manually / via PR)
+//   unset                   → off (default — files change, you commit yourself)
+const GIT_SYNC_MODE = (process.env.CHORUS_GIT_SYNC || '').toLowerCase();
+const GIT_SYNC_PUSH = ['1', 'true', 'push'].includes(GIT_SYNC_MODE);
+const GIT_SYNC = GIT_SYNC_PUSH || GIT_SYNC_MODE === 'commit';
+const GIT_SYNC_DEBOUNCE_MS = 10_000;
+// How often to pull teammates' changes when push-sync is on (the inbound half
+// of the Dropbox model). Set CHORUS_GIT_PULL_SECONDS=0 to disable pulling.
+const GIT_SYNC_PULL_MS = Math.max(0, Number(process.env.CHORUS_GIT_PULL_SECONDS ?? 30)) * 1000;
 
 // Directories to scan for PRD/project docs (relative to ROOT)
 // Add your own directories here
@@ -337,11 +351,243 @@ async function regenerateDashboard() {
 }
 
 // ---------------------------------------------------------------------------
+// Git auto-sync — the Dropbox model: a local folder that stays in sync with the
+// remote in both directions, transparently. Three pieces:
+//   1. Outbound  — any change to a PRD file auto-commits (+pushes).
+//   2. Inbound   — a background loop pulls teammates' changes on a timer.
+//   3. Watch     — fs.watch catches edits made by AI agents and editors, not
+//                  just clicks on the board, so the whole folder is the source
+//                  of truth (this is what makes it feel like Dropbox, not git).
+// Unlike Dropbox, conflicts are never resolved by last-write-wins: a real merge
+// conflict halts auto-sync and surfaces a banner so nothing is silently lost.
+// ---------------------------------------------------------------------------
+
+const pendingChanges = new Map(); // relPath → Set of human-readable change descriptions
+let gitSyncTimer = null;
+
+// boardRevision bumps whenever files on disk change (local edit or inbound pull)
+// so the browser can poll and refresh without a manual reload.
+let boardRevision = 0;
+// While we run git operations that touch the working tree (pull), ignore the
+// resulting fs.watch events so we don't try to re-commit just-pulled files.
+let suppressWatch = false;
+// syncState drives the board's status banner and the /api/sync-status endpoint.
+let syncState = { status: GIT_SYNC ? 'ok' : 'off', message: '', files: [] };
+let conflictLogged = false; // avoid spamming the console every retry tick
+
+function git(...args) {
+  return execFileSync('git', args, {
+    cwd: ROOT,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).toString();
+}
+
+function gitTry(...args) {
+  try { git(...args); return true; } catch { return false; }
+}
+
+/**
+ * Queue a file for git sync. Changes are debounced so a burst of board
+ * activity (dragging several cards, checking off a list) lands as one commit.
+ * `description` may be null for changes detected on disk (AI/editor edits),
+ * in which case a generic message is used only if nothing nicer is pending.
+ */
+function queueGitSync(relPath, description) {
+  if (!GIT_SYNC) return;
+  if (syncState.status === 'conflict') return; // halted until the human resolves
+  if (!pendingChanges.has(relPath)) pendingChanges.set(relPath, new Set());
+  if (description) pendingChanges.get(relPath).add(description);
+  clearTimeout(gitSyncTimer);
+  gitSyncTimer = setTimeout(flushGitSync, GIT_SYNC_DEBOUNCE_MS);
+}
+
+function flushGitSync() {
+  if (syncState.status === 'conflict') return;
+  const changes = new Map(pendingChanges);
+  pendingChanges.clear();
+
+  try {
+    // Stage the entire watched area (+dashboard), not just queued files, so a
+    // dirty-but-unqueued PRD can never be left behind to block the pull loop.
+    const files = [...SCAN_DIRS];
+    if (existsSync(join(ROOT, 'docs', 'DASHBOARD.md'))) files.push('docs/DASHBOARD.md');
+    git('add', '--', ...files);
+
+    // Nothing actually staged (e.g. change was reverted, or the file was just
+    // pulled from the remote) — skip silently.
+    if (!git('diff', '--cached', '--name-only').trim()) return;
+
+    const descriptions = [...changes.values()].flatMap(set => [...set]);
+    if (descriptions.length === 0) descriptions.push(`${Math.max(changes.size, 1)} PRD file(s) updated`);
+    const message = descriptions.length === 1
+      ? `chorus: ${descriptions[0]}`
+      : `chorus: update ${changes.size} PRD${changes.size > 1 ? 's' : ''} (${descriptions.length} changes)`;
+    git('commit', '-m', message, '-m', descriptions.join('\n'));
+    console.log(`  [git-sync] committed: ${message}`);
+
+    if (GIT_SYNC_PUSH) {
+      pullRebase();                 // integrate remote first (may flag a conflict)
+      if (syncState.status === 'conflict') return;
+      git('push');
+      console.log('  [git-sync] pushed');
+      setSyncOk();
+    }
+  } catch (err) {
+    const detail = err.stderr?.toString().trim() || err.message;
+    console.error(`  [git-sync] failed: ${detail}`);
+    console.error('  [git-sync] changes are saved in your files — commit manually or retry on next change');
+    syncState = { status: 'error', message: detail, files: [...changes.keys()] };
+    // Re-queue so the next board action retries this batch too
+    for (const [path, descs] of changes) {
+      if (!pendingChanges.has(path)) pendingChanges.set(path, new Set());
+      for (const d of descs) pendingChanges.get(path).add(d);
+    }
+  }
+}
+
+function setSyncOk() {
+  // A successful git operation is authoritative — it clears a prior conflict too.
+  if (syncState.status === 'conflict' && conflictLogged) {
+    console.log('  [git-sync] conflict resolved — auto-sync resumed');
+  }
+  syncState = { status: 'ok', message: '', files: [] };
+  conflictLogged = false;
+}
+
+function hasUncommittedPRDs() {
+  return git('status', '--porcelain', '--', ...SCAN_DIRS).trim() !== '';
+}
+
+// True when HEAD has local commits not yet on the upstream branch.
+function isAheadOfUpstream() {
+  try { return Number(git('rev-list', '--count', '@{u}..HEAD').trim()) > 0; }
+  catch { return false; } // no upstream configured — nothing to push to
+}
+
+/**
+ * Pull teammates' changes via rebase. CALLER MUST ENSURE A CLEAN TREE first
+ * (commit local edits) — we deliberately do NOT use --autostash, because
+ * stashing uncommitted work and popping it after the pull resolves conflicts
+ * by silently leaving markers/last-write-wins, which is the data loss we exist
+ * to prevent. On a clean tree, a conflicting rebase fails loudly and we can
+ * abort it cleanly. On a real merge conflict we abort the rebase (returning to
+ * a clean state — the local commit is kept) and enter `conflict` status, which
+ * halts auto-commit/push until a human resolves it manually.
+ */
+function pullRebase() {
+  // Refuse to pull over a dirty tree — committing first is the caller's job.
+  if (hasUncommittedPRDs()) return;
+  suppressWatch = true;
+  try {
+    const before = git('rev-parse', 'HEAD').trim();
+    git('pull', '--rebase');
+    const after = git('rev-parse', 'HEAD').trim();
+    if (before !== after) {
+      boardRevision++; // remote brought changes — refresh the board
+      console.log('  [git-sync] pulled remote changes');
+    }
+    setSyncOk();
+  } catch (err) {
+    // Distinguish "offline / no upstream" from a genuine merge conflict.
+    const rebaseInProgress = existsSync(join(ROOT, '.git', 'rebase-merge'))
+      || existsSync(join(ROOT, '.git', 'rebase-apply'));
+    if (rebaseInProgress) {
+      const conflicted = git('diff', '--name-only', '--diff-filter=U').trim().split('\n').filter(Boolean);
+      gitTry('rebase', '--abort'); // back to a clean tree — local commit is kept, nothing lost
+      syncState = {
+        status: 'conflict',
+        message: 'A PRD was changed both here and on the remote. Auto-sync is paused — resolve manually, then it resumes.',
+        files: conflicted,
+      };
+      if (!conflictLogged) {
+        console.error('  [git-sync] CONFLICT — auto-sync paused. Conflicting files:', conflicted.join(', ') || '(unknown)');
+        console.error('  [git-sync] resolve with: git pull --rebase  (fix conflicts, then continue) — sync resumes automatically');
+        conflictLogged = true;
+      }
+    } else {
+      const detail = err.stderr?.toString().trim() || err.message;
+      syncState = { status: 'error', message: `pull failed: ${detail}`, files: [] };
+      console.error(`  [git-sync] pull failed (offline?): ${detail}`);
+    }
+  } finally {
+    // Let the just-finished tree settle before re-enabling the watcher.
+    setTimeout(() => { suppressWatch = false; }, 500);
+  }
+}
+
+// Background inbound loop — the half that makes it bidirectional.
+function startPullLoop() {
+  if (!GIT_SYNC_PUSH || GIT_SYNC_PULL_MS === 0) return;
+  setInterval(() => {
+    // If a rebase is in progress, a human is resolving the conflict by hand —
+    // never touch it. We wait; once they finish and HEAD is clean, the next
+    // tick's pull succeeds and clears the conflict on its own.
+    if (existsSync(join(ROOT, '.git', 'rebase-merge'))
+      || existsSync(join(ROOT, '.git', 'rebase-apply'))) return;
+    // Commit any local edits BEFORE pulling so rebase conflict detection is
+    // reliable (flushGitSync commits, then pulls, then pushes in one shot).
+    // This also closes the race where the pull timer fires inside the commit
+    // debounce window — we'd otherwise pull over a dirty tree.
+    if (pendingChanges.size > 0 || hasUncommittedPRDs()) { flushGitSync(); return; }
+    // Clean tree: just pull. When in conflict this re-attempts and self-clears
+    // the moment the divergence is resolved; a still-conflicting pull aborts.
+    pullRebase();
+    // Self-heal a commit whose push failed earlier (transient offline): if the
+    // pull succeeded and we're now ahead of upstream, push the backlog.
+    if (syncState.status === 'ok' && isAheadOfUpstream()) {
+      try { git('push'); console.log('  [git-sync] pushed pending commit(s)'); }
+      catch (err) { console.error(`  [git-sync] push retry failed: ${err.stderr?.toString().trim() || err.message}`); }
+    }
+  }, GIT_SYNC_PULL_MS).unref();
+}
+
+// File watcher — catches PRD edits from AI agents, editors, and the board alike.
+// fs.watch recursive mode is supported on macOS and Windows (Chorus's targets).
+function startWatcher() {
+  let bumpTimer = null;
+  for (const dir of SCAN_DIRS) {
+    const abs = join(ROOT, dir);
+    if (!existsSync(abs)) continue;
+    try {
+      watch(abs, { recursive: true }, (_event, filename) => {
+        if (suppressWatch || !filename) return;
+        if (extname(filename) !== '.md') return;
+        if (SKIP_FILES.has(basename(filename))) return;
+        const relPath = relative(ROOT, join(abs, filename));
+        // Debounce the revision bump so editors' multi-write saves coalesce.
+        clearTimeout(bumpTimer);
+        bumpTimer = setTimeout(() => { boardRevision++; }, 300);
+        // Queue a commit for disk edits not already described by a board action.
+        queueGitSync(relPath, null);
+      });
+      console.log(`  [git-sync] watching ${dir} for changes`);
+    } catch (err) {
+      console.error(`  [git-sync] could not watch ${dir}: ${err.message}`);
+    }
+  }
+}
+
+// Don't lose a pending commit if the server is stopped during the debounce window
+process.on('SIGINT', () => {
+  clearTimeout(gitSyncTimer);
+  flushGitSync();
+  process.exit(0);
+});
+
+// ---------------------------------------------------------------------------
 // HTTP Server
 // ---------------------------------------------------------------------------
 
 async function handleRequest(req, res) {
   const url = new URL(req.url, `http://localhost:${PORT}`);
+
+  // API: sync status + board revision (polled by the board to auto-refresh on
+  // inbound changes and to surface conflict/error banners)
+  if (url.pathname === '/api/sync-status' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ...syncState, revision: boardRevision }));
+    return;
+  }
 
   // API: list all PRDs
   if (url.pathname === '/api/prds' && req.method === 'GET') {
@@ -362,6 +608,7 @@ async function handleRequest(req, res) {
     }
     await updatePRDStatus(file, status);
     await regenerateDashboard();
+    queueGitSync(file, `${basename(file, '.md')} → ${status}`);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
     return;
@@ -414,6 +661,7 @@ async function handleRequest(req, res) {
     const replacement = checked ? '- [x]' : '- [ ]';
     content = content.slice(0, pos.start) + replacement + content.slice(pos.end);
     await writeFile(fullPath, content, 'utf-8');
+    queueGitSync(file, `${basename(file, '.md')}: checklist ${checked ? 'check' : 'uncheck'} #${index + 1}`);
 
     // Return updated content
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -455,5 +703,19 @@ server.listen(PORT, () => {
   console.log(`\n  Chorus — AI-Native Project Management\n`);
   console.log(`    http://localhost:${PORT}\n`);
   console.log(`  Scanning: ${SCAN_DIRS.join(', ')}`);
-  console.log(`  Drag cards to change status. Click to view. Check boxes to complete.\n`);
+  console.log(`  Drag cards to change status. Click to view. Check boxes to complete.`);
+  if (GIT_SYNC) {
+    console.log(`  Git sync: ON — changes auto-commit${GIT_SYNC_PUSH ? ' + push' : ' (no push)'} after ${GIT_SYNC_DEBOUNCE_MS / 1000}s of inactivity`);
+    if (GIT_SYNC_PUSH && GIT_SYNC_PULL_MS > 0) {
+      console.log(`             pulling teammates' changes every ${GIT_SYNC_PULL_MS / 1000}s`);
+    }
+  } else {
+    console.log(`  Git sync: off — set CHORUS_GIT_SYNC=1 to auto commit+push board changes`);
+  }
+  console.log('');
+
+  // Always watch (powers live board refresh even with sync off); pull only when
+  // push-sync is on.
+  startWatcher();
+  startPullLoop();
 });

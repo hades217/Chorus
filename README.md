@@ -95,9 +95,12 @@ your-project/
 │   │   ├── server.mjs        # Kanban board server
 │   │   └── index.html         # Kanban UI
 │   └── generate-prd-dashboard.mjs  # Dashboard generator
-└── docs/
-    └── prd/
-        └── TEMPLATE.md        # PRD template
+├── docs/
+│   └── prd/
+│       └── TEMPLATE.md        # PRD template
+└── .claude/
+    └── agents/
+        └── chorus-steward.md  # PM steward agent (Claude Code, optional)
 ```
 
 ### 2. Start the kanban board
@@ -148,7 +151,38 @@ The real power of Chorus is when your AI coding assistant follows these rules:
 5. When all criteria are met: set status to review or done
 6. If a PRD lacks YAML frontmatter, add it immediately
 7. After any status change: run node scripts/generate-prd-dashboard.mjs
+8. Commit PRD changes with the related code; commit + push standalone
+   PRD changes immediately — uncommitted status is invisible to the team
 ```
+
+The full version of these rules lives in [`chorus-rules.md`](chorus-rules.md).
+
+### The steward agent: a dedicated PM for your repo
+
+Rules cover the happy path, but boards still drift: someone forgets to
+push, code merges without its PRD, a PRD sits in-progress for weeks.
+Chorus ships a **steward subagent** ([`.claude/agents/chorus-steward.md`](.claude/agents/chorus-steward.md))
+that acts as a dedicated project manager. Since it lives in the repo,
+everyone on the team gets it automatically via `git pull`.
+
+In Claude Code, just ask:
+
+```
+> Use the chorus-steward agent to audit the PRDs
+```
+
+The steward:
+
+1. **Detects status drift** — code merged but PRD still says in-progress?
+   Checkboxes that shipped but were never checked? It fixes them.
+2. **Surfaces what matters** — reports all critical/high priority PRDs
+   that aren't done, most important first
+3. **Flags stale work** — in-progress PRDs with no git activity in 7+ days
+4. **Normalizes** — adds missing frontmatter, fixes status values
+5. **Commits + pushes** its fixes and regenerates the dashboard
+
+Run it at the start of the day, before sprint planning, or whenever the
+board feels out of sync with reality.
 
 ### What happens
 
@@ -232,6 +266,39 @@ const STATUS_ORDER = [
 ### Port
 
 Default is `4000`. Change `PORT` in `server.mjs`.
+
+### Git auto-sync — your repo as a synced folder
+
+By default, edits only change files on disk — you commit them yourself. Turn
+on auto-sync and your `docs/` folder behaves like a Dropbox/OneDrive folder:
+edit locally, and it stays in sync with the remote in both directions,
+transparently. No one has to remember to commit a PRD.
+
+```bash
+CHORUS_GIT_SYNC=1 node scripts/prd-board/server.mjs       # bidirectional: auto commit + pull + push
+CHORUS_GIT_SYNC=commit node scripts/prd-board/server.mjs  # auto commit only (push via PR)
+```
+
+What it does:
+
+- **Watches the whole folder, not just the board.** Any change to a PRD —
+  dragging a card, checking a box, *or an AI agent editing the file
+  directly* — is detected via `fs.watch` and committed. This is the point:
+  Chorus's whole premise is AI agents updating PRDs, and they edit files,
+  not the board.
+- **Debounces commits.** A burst of activity lands as one commit
+  (`chorus: user-auth-redesign → done`), ~10s after the last edit.
+- **Pulls teammates' changes** every 30s (with push-sync on). When a
+  teammate's change arrives, your board refreshes on its own — no reload.
+- **Never resolves conflicts by guessing.** If the same PRD changed both
+  locally and on the remote, auto-sync *pauses*, shows a banner, and keeps
+  your local commit intact. Resolve it with `git pull --rebase` as usual;
+  sync resumes automatically once the tree is clean. Unlike a plain
+  file-sync tool, nothing is silently overwritten or lost.
+
+Tune the pull interval with `CHORUS_GIT_PULL_SECONDS` (default `30`; `0`
+disables inbound pulling). The board's live-refresh works even with sync
+off, so an AI agent editing a PRD updates your board instantly either way.
 
 ## Frontmatter Spec
 
